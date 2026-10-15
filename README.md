@@ -5,7 +5,16 @@ l'API [Bitnob](https://www.bitnob.dev) — pensé pour le workshop **Code & Chai
 
 > **Invoice → QR → Webhook → Payout**
 
-Trois blocs sur une page Vue 3 :
+**Deux interfaces**, la même API — on passe de l'une à l'autre avec le
+sélecteur en bas à droite (ou l'URL `#banc` / `#classique`) :
+
+- **Banc** (par défaut) : la commande à gauche, au centre le **fil des
+  échanges** — un diagramme de séquence des vraies requêtes navigateur ↔
+  serveur ↔ Bitnob — et à droite l'**inspecteur** (en-têtes HMAC, corps JSON,
+  vérifications, anatomie BOLT11). Boutons « Rejouer le webhook » et « Forger
+  un faux webhook » : de vraies requêtes vers ton serveur. Mode projecteur
+  pour grossir le texte.
+- **Classique** : trois blocs sur une page :
 
 | Bloc | Ce qu'on montre | Endpoint Bitnob utilisé |
 |------|-----------------|--------------------------|
@@ -22,12 +31,17 @@ Trois blocs sur une page Vue 3 :
 ├── api/index.js → enveloppe serverless de l'app Express
 ├── server/
 │  ├── index.js → lance l'écoute HTTP + expiration factures
-│  ├── app.js → 5 routes API + traitement webhook
-│  └── registre.js → mémoire : factures, journal, dédup
+│  ├── app.js → routes API + traitement webhook
+│  └── registre.js → mémoire : factures, journal, échanges, dédup
 ├── src/
-│  ├── main.js · App.vue → l'interface (une seule page)
+│  ├── main.js · App.vue → choisit l'interface (#banc / #classique)
+│  ├── views/Banc.vue → commande · fil des échanges · inspecteur
+│  ├── views/Classique.vue → les 3 blocs : facture, payout, journal
 │  ├── styles/global.css → palette Sénégal (vert/jaune/rouge/sable)
-│  └── lib/bitnob.js → TOUTE l'intégration Bitnob est ici
+│  ├── components/AnatomieBolt11.vue → la facture décortiquée
+│  └── lib/
+│     ├── bitnob.js → TOUTE l'intégration Bitnob est ici
+│     └── bolt11.js → décoder (et fabriquer) une facture BOLT11
 └── scripts/smoke.mjs → test de bout en bout (mode simulation)
 ```
 
@@ -86,6 +100,24 @@ serveur sur une machine qui reste allumée (`npm start`, ou Render/Fly/Railway).
 Pour aller loin : remplace `server/registre.js` par une base (Vercel KV, Upstash
 Redis…), le reste du code ne change pas.
 
+### Avant de mettre en ligne avec de vraies clés : `ADMIN_TOKEN`
+
+Sans protection, n'importe qui connaissant l'URL pourrait appeler
+`POST /api/pay` et **payer avec ton solde Bitnob**. Donc :
+
+```bash
+ADMIN_TOKEN=$(node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))")
+```
+
+| Variable | Effet |
+|----------|-------|
+| `ADMIN_TOKEN` défini | payout, fil des échanges, journal et rejeu exigent l'en-tête `x-admin-token`. L'interface affiche un champ « Code admin » (gardé le temps de l'onglet). |
+| `MOCK_PAYMENTS=false` **sans** `ADMIN_TOKEN` | le payout est **refusé** (403) : un oubli ne laisse pas ton solde ouvert. |
+| `DEMO_TOOLS=false` | coupe le fil des échanges et le rejeu de webhook (vraie production). |
+
+Restent publics : la création de facture (on reçoit de l'argent), le statut
+d'une facture et le webhook, protégé par sa signature HMAC.
+
 ## 4. Le flux, en schéma
 
 ```
@@ -104,7 +136,51 @@ Redis…), le reste du code ne change pas.
   statut "payé" ◀─────────── GET /api/invoices/:id (polling, filet de sécurité)
 ```
 
-## 5. Sécurité — les 3 règles du webhook
+### Ce que le fil montre (interface Banc)
+
+Le serveur trace chaque échange et les expose sur `GET /api/echanges` : le
+navigateur ne fabrique rien, il affiche ce qui s'est réellement passé. En
+simulation, les appels à Bitnob sont marqués **SIMULÉ** (le serveur montre
+ce qu'il aurait envoyé) ; avec de vraies clés, ce sont les vraies requêtes.
+Les signatures sont tronquées et la clé secrète n'est jamais tracée.
+`POST /api/demo/rejouer-webhook` renvoie le dernier webhook authentique,
+octet pour octet, pour démontrer l'idempotence.
+
+## 5. Anatomie d'une facture BOLT11
+
+Une facture `lnbc…` n'est pas un identifiant opaque : c'est un **message
+signé**, encodé en bech32 (comme les adresses `bc1…`). L'interface la
+décortique **dans le navigateur**, sans rien demander à personne
+(survole chaque morceau coloré) :
+
+```
+lnbcrt 1500n 1 p4vla70 pp5… sp5… dq… xq… [signature] [checksum]
+│      │     │ │       └─── champs étiquetés : p = payment_hash, s = payment_secret,
+│      │     │ │            d = description, x = expiration…
+│      │     │ └ horodatage de création
+│      │     └ séparateur bech32
+│      └ montant : 1500 nano-BTC = 150 sats  (m = milli, u = micro, n = nano, p = pico)
+└ réseau : lnbc = mainnet, lntb = testnet, lnbcrt = regtest
+```
+
+À retenir :
+
+- **La signature identifie le nœud destinataire** : on retrouve sa clé
+  publique à partir de la signature, elle n'a pas besoin d'être écrite.
+- **Le checksum** détecte une faute de frappe ou une facture tronquée.
+- **Payer, c'est obtenir la preimage** : `payment_hash = sha256(preimage)`.
+  Le destinataire ne révèle la preimage qu'en échange des sats — la détenir,
+  c'est le **reçu**. L'interface fait la vérification une fois la facture payée.
+- **On décode toujours avant de payer** : le bloc payout affiche montant,
+  description, expiration et nœud, et refuse une facture illisible, mal
+  signée ou expirée (`payInvoice` fait la même vérification côté serveur).
+
+En mode simulation, les factures sont de **vraies factures BOLT11 signées**
+(réseau regtest, par un « nœud de démo ») : tout décodeur les lit — par
+exemple colle-en une dans [lightningdecoder.com](https://lightningdecoder.com).
+Aucun wallet ne peut les payer, puisque ce nœud n'existe pas.
+
+## 6. Sécurité — les 3 règles du webhook
 
 1. **Signature** : chaque POST de Bitnob porte `x-bitnob-signature`
   (HMAC-SHA512 du corps brut avec ton signing secret). On compare en
@@ -115,7 +191,7 @@ Redis…), le reste du code ne change pas.
 3. **Côté serveur uniquement** : le navigateur ne déclare jamais un paiement.
   Il affiche, le serveur vérifie.
 
-## 6. Points à vérifier dans la doc Bitnob
+## 7. Points à vérifier dans la doc Bitnob
 
 Ce que les docs officielles confirment clairement, et les deux détails à
 re-vérifier dans le [playground](https://www.bitnob.dev/api-reference/lightning/play-ground)
@@ -133,7 +209,7 @@ avant un usage en production :
 -  **Encodage de la signature webhook** : la doc dit HMAC-SHA512 sans préciser
   hex ou base64 — le module accepte les deux.
 
-## 7. Forke et crée ta variante
+## 8. Forke et crée ta variante
 
 5 idées pour transformer cette démo en vrai projet :
 

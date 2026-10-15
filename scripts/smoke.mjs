@@ -5,6 +5,7 @@
 // ════════════════════════════════════════════════════════════════
 import crypto from 'node:crypto'
 import dotenv from 'dotenv'
+import { decoderBolt11, verifierPreimage } from '../src/lib/bolt11.js'
 
 //  On lit le même .env que le serveur : le secret de webhook doit être
 // identique des deux côtés pour que la signature de test soit valide.
@@ -39,6 +40,18 @@ r = await api('/api/invoices', { method: 'POST', corps: { amount: 42, descriptio
 ok('POST /api/invoices crée une facture', r.status === 201 && !!r.data.id && !!r.data.paymentRequest)
 const facture = r.data
 
+// ── 2 bis. La facture est un vrai BOLT11, lisible et signé ─────
+let decodee = null
+try { decodee = decoderBolt11(facture.paymentRequest) } catch (e) { ok('BOLT11 décodable', false, e.message) }
+if (decodee) {
+  ok('BOLT11 décodable', true, `${decodee.reseauNom}, nœud ${decodee.noeud.slice(0, 12)}…`)
+  ok('BOLT11 : montant = 42 sats', decodee.montantSats === 42, `${decodee.montantSats}`)
+  ok('BOLT11 : description', decodee.description === 'Smoke test')
+  ok('BOLT11 : signature valide', decodee.signatureValide === true)
+  ok('BOLT11 : payment_hash = celui de la facture', decodee.paymentHash === facture.paymentHash)
+}
+ok('preimage gardée secrète avant paiement', !facture.preimage)
+
 // ── 3. Elle est payée automatiquement (~2 s) via webhook signé ──
 let statut = 'pending'
 for (let i = 0; i < 8 && statut === 'pending'; i++) {
@@ -47,6 +60,8 @@ for (let i = 0; i < 8 && statut === 'pending'; i++) {
   statut = s.data.status
 }
 ok('facture payée automatiquement', statut === 'paid', `statut=${statut}`)
+const apres = (await api(`/api/invoices/${facture.id}`)).data
+ok('preuve : sha256(preimage) == payment_hash', verifierPreimage(apres.preimage, decodee?.paymentHash))
 
 // ── 4. Le webhook est apparu dans le journal ───────────────────
 r = await api('/api/journal')
@@ -77,6 +92,12 @@ ok('mauvaise signature refusée (401)', refus.status === 401)
 // ── 7. Payout simulé ───────────────────────────────────────────
 r = await api('/api/pay', { method: 'POST', corps: { invoice: facture.paymentRequest } })
 ok('POST /api/pay (payout simulé)', r.status === 200 && r.data.status === 'success')
+ok('payout : montant lu dans la facture (42 sats)', r.data.montantSats === 42, `${r.data.montantSats}`)
+
+// ── 8. Facture altérée → refusée avant tout paiement ───────────
+const alteree = facture.paymentRequest.replace(/.$/, (c) => (c === 'q' ? 'p' : 'q'))
+r = await api('/api/pay', { method: 'POST', corps: { invoice: alteree } })
+ok('facture altérée refusée (checksum)', r.status === 400, r.data.erreur)
 
 // ── Bilan ──────────────────────────────────────────────────────
 console.log('')

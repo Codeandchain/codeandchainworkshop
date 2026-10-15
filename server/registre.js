@@ -18,6 +18,25 @@ export function noter(type, titre, detail = '', ok = true) {
   if (journal.length > MAX_JOURNAL) journal.length = MAX_JOURNAL
 }
 
+// ── Les échanges, pour le « fil » de l'interface Banc ──────────
+//  Chaque requête/réponse entre navigateur, serveur et Bitnob, dans
+//  l'ordre : { n, at, cle, de, vers, type, http, entetes, corps,
+//  verifs, bolt11, simule, ko }. Les signatures y sont TRONQUÉES et
+//  les secrets n'y entrent jamais : tout ceci part au navigateur.
+export const echanges = []
+let compteurEchanges = 0
+const MAX_ECHANGES = 80
+
+export function noterEchange(e) {
+  if (String(process.env.DEMO_TOOLS ?? 'true').toLowerCase() === 'false') return // fil coupé
+  echanges.push({ n: ++compteurEchanges, at: Date.now(), ...e })
+  if (echanges.length > MAX_ECHANGES) echanges.splice(0, echanges.length - MAX_ECHANGES)
+}
+
+// Le dernier webhook reçu (corps brut + signature), pour la démo
+// « rejouer le webhook » : on le renvoie tel quel au serveur.
+export const dernierWebhook = { corps: null, signature: null }
+
 // Expiration des factures non payées (appelé par la tickeuse du serveur)
 export function expirerFactures() {
   const maintenant = Date.now()

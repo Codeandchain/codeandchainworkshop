@@ -33,6 +33,7 @@
 // ════════════════════════════════════════════════════════════════
 
 import crypto from 'node:crypto'
+import { encoderBolt11, decoderBolt11 } from './bolt11.js'
 
 // Garde-fou pédagogique : ce fichier est serveur UNIQUEMENT.
 if (typeof window !== 'undefined') {
@@ -76,17 +77,58 @@ function enTetesAuth(payload) {
   }
 }
 
+// ── Traçage des échanges (pour le « fil » de l'interface Banc) ─
+//  Le serveur s'abonne avec onEchange() ; ce module lui décrit chaque
+//  appel à Bitnob. Les valeurs longues sont abrégées, les signatures
+//  tronquées, et la clé secrète n'apparaît JAMAIS.
+let handlerEchange = null
+export function onEchange(handler) {
+  handlerEchange = handler
+}
+function tracer(echange) {
+  try { handlerEchange?.(echange) } catch (e) { console.error('traçage :', e) }
+}
+export function abreger(valeur) {
+  if (typeof valeur === 'string') return valeur.length > 48 ? `${valeur.slice(0, 24)}…${valeur.slice(-8)}` : valeur
+  if (Array.isArray(valeur)) return valeur.map(abreger)
+  if (valeur && typeof valeur === 'object') return Object.fromEntries(Object.entries(valeur).map(([k, v]) => [k, abreger(v)]))
+  return valeur
+}
+const enTetesVisibles = (h) => [
+  ['X-Auth-Client', `${h['X-Auth-Client'].slice(0, 6)}…`],
+  ['X-Auth-Timestamp', h['X-Auth-Timestamp']],
+  ['X-Auth-Nonce', h['X-Auth-Nonce']],
+  ['X-Auth-Signature', abreger(h['X-Auth-Signature'])],
+]
+
 // Petit client HTTP vers l'API Bitnob (timeout 10 s).
-async function appelerBitnob(methode, chemin, corps = null) {
+//  `cle` (facultatif) : nom de l'échange dans le fil. Sans cle, pas
+//  de traçage (ex. le polling du statut, qui tourne chaque seconde).
+async function appelerBitnob(methode, chemin, corps = null, cle = null) {
   const { baseUrl } = configBitnob()
   const brut = corps ? JSON.stringify(corps) : ''
-  const reponse = await fetch(`${baseUrl}${chemin}`, {
+  const enTetes = enTetesAuth(brut)
+  if (cle) {
+  tracer({ cle: `bitnob.${cle}`, de: 'serveur', vers: 'bitnob', type: 'req',
+  http: { methode, url: `${baseUrl}${chemin}` }, entetes: enTetesVisibles(enTetes), corps: corps && abreger(corps) })
+  }
+  let reponse
+  try {
+  reponse = await fetch(`${baseUrl}${chemin}`, {
   method: methode,
-  headers: enTetesAuth(brut),
+  headers: enTetes,
   body: brut || undefined,
   signal: AbortSignal.timeout(10_000),
   })
+  } catch (e) {
+  if (cle) tracer({ cle: `bitnob.${cle}.rep`, de: 'bitnob', vers: 'serveur', type: 'rep', ko: true, http: { methode, url: chemin, statut: 'réseau' }, corps: { erreur: String(e.message || e) } })
+  throw e
+  }
   const data = await reponse.json().catch(() => ({}))
+  if (cle) {
+  tracer({ cle: `bitnob.${cle}.rep`, de: 'bitnob', vers: 'serveur', type: 'rep', ko: !reponse.ok,
+  http: { methode, url: chemin, statut: reponse.status }, corps: abreger(data), bolt11: (data.data ?? data)?.request })
+  }
   if (!reponse.ok) {
   throw new Error(`Bitnob ${methode} ${chemin} → ${reponse.status} ${JSON.stringify(data)}`)
   }
@@ -104,6 +146,16 @@ export function onMockPayment(handler) {
 }
 
 const hexAlea = (n) => crypto.randomBytes(n).toString('hex')
+const sha256Hex = (hex) => crypto.createHash('sha256').update(Buffer.from(hex, 'hex')).digest('hex')
+
+// Clé privée du "nœud de démo" qui signe les factures simulées.
+// Fixe (dérivée d'une phrase) : la clé publique affichée par le
+// décodeur reste la même d'une facture à l'autre, comme un vrai nœud.
+const CLE_NOEUD_DEMO = crypto.createHash('sha256').update('noeud-demo-code-and-chain-dakar').digest()
+
+// Les preimages restent SECRÈTES jusqu'au paiement (comme chez un
+// vrai nœud) : elles ne sont jamais renvoyées avant le statut "paid".
+const preimagesMock = new Map()
 
 // ════════════════════════════════════════════════════════════════
 //  createInvoice(amountSats, metadata)
@@ -118,20 +170,39 @@ export async function createInvoice(amountSats, metadata = {}) {
   if (cfg.mock) {
   const id = crypto.randomUUID()
   const reference = `demo-${id.slice(0, 8)}`
+  //  Comme un vrai nœud : on tire d'abord la preimage (le secret),
+  //  et le payment_hash est son sha256. Payer = obtenir la preimage.
+  const preimage = hexAlea(32)
+  const paymentHash = sha256Hex(preimage)
+  const description = metadata.description || 'Démo Bitnob'
   const facture = {
   id,
   reference,
-  paymentHash: hexAlea(32),
+  paymentHash,
   montantSats: amountSats,
-  description: metadata.description || 'Démo Bitnob',
-  paymentRequest: `lnbcrt${amountSats}n1demobitnob${id.replace(/-/g, '')}`,
+  description,
+  // Une VRAIE facture BOLT11 (réseau regtest), signée par le nœud de démo
+  paymentRequest: encoderBolt11({
+  reseau: 'bcrt', montantSats: amountSats, paymentHash, paymentSecret: hexAlea(32),
+  description, expiration: cfg.expiryS, clePrivee: CLE_NOEUD_DEMO,
+  }),
   status: 'pending',
   preimage: '',
   expiresAt: Date.now() + cfg.expiryS * 1000,
   traitee: false,
   mock: true,
   }
+  preimagesMock.set(id, preimage)
   facturesMock.set(id, facture)
+  // Le fil montre l'appel que l'on AURAIT fait — marqué « simulé »
+  tracer({ cle: 'bitnob.facture', de: 'serveur', vers: 'bitnob', type: 'req', simule: true,
+  http: { methode: 'POST', url: `${cfg.baseUrl}/api/lightning/invoices` },
+  entetes: [['X-Auth-Signature', '(simulation : aucune clé, aucun appel)']],
+  corps: { reference, amount: amountSats, description, expiry: cfg.expiryS } })
+  tracer({ cle: 'bitnob.facture.rep', de: 'bitnob', vers: 'serveur', type: 'rep', simule: true,
+  http: { methode: 'POST', url: '/api/lightning/invoices', statut: 201 },
+  corps: abreger({ id, reference, payment_hash: paymentHash, request: facture.paymentRequest, status: 'pending' }),
+  bolt11: facture.paymentRequest })
 
   // ⏱ Auto-paiement factice après MOCK_PAYMENT_DELAY_MS (2 s) :
   //  le serveur recevra ensuite un webhook signé, comme en vrai.
@@ -139,7 +210,9 @@ export async function createInvoice(amountSats, metadata = {}) {
   const f = facturesMock.get(id)
   if (!f || f.status !== 'pending') return
   f.status = 'paid'
-  f.preimage = hexAlea(32)
+  f.preimage = preimagesMock.get(id) // révélée seulement maintenant
+  tracer({ cle: 'reseau.paiement', de: 'bitnob', vers: 'bitnob', type: 'evt', simule: true,
+  verifs: [[sha256Hex(f.preimage) === f.paymentHash, 'sha256(preimage) = payment_hash', `${abreger(f.preimage)} → ${abreger(f.paymentHash)}`]] })
   handlerPaiementMock?.(f)
   }, cfg.mockDelaiMs)
 
@@ -157,7 +230,7 @@ export async function createInvoice(amountSats, metadata = {}) {
   description: metadata.description || 'Démo Bitnob',
   expiry: cfg.expiryS, // secondes
   }
-  const reponse = await appelerBitnob('POST', '/api/lightning/invoices', corps)
+  const reponse = await appelerBitnob('POST', '/api/lightning/invoices', corps, 'facture')
   const f = reponse.data ?? reponse
   return {
   id: f.id,
@@ -209,25 +282,40 @@ export async function getInvoiceStatus(id) {
 // ════════════════════════════════════════════════════════════════
 export async function payInvoice(bolt11, { reference } = {}) {
   const cfg = configBitnob()
-  if (typeof bolt11 !== 'string' || !/^ln(bc|tb|bcrt)/i.test(bolt11.trim())) {
-  throw new Error('Ce n\'est pas une facture Lightning (BOLT11 commence par lnbc / lntb / lnbcrt)')
+  //  Règle d'or : on DÉCODE avant de payer. Montant, expiration,
+  //  destinataire… tout est dans la facture : on vérifie avant
+  //  d'envoyer le moindre sat.
+  let decodee
+  try {
+  decodee = decoderBolt11(bolt11)
+  } catch (e) {
+  tracer({ cle: 'payout.decode', de: 'serveur', vers: 'serveur', type: 'soi', ko: true, verifs: [[false, 'Facture BOLT11 lisible', e.message]] })
+  throw new Error(`Facture illisible : ${e.message}`)
   }
+  const verifs = [
+  [true, 'Checksum bech32 valide'],
+  [decodee.signatureValide, 'Signature du nœud valide', abreger(decodee.noeud || '')],
+  [!decodee.expiree, decodee.expiree ? 'Facture expirée' : 'Facture pas expirée', new Date(decodee.expireLe).toLocaleString('fr-FR')],
+  [true, `Montant : ${decodee.montantSats ?? 'libre'} sats`, decodee.description || ''],
+  ]
+  tracer({ cle: 'payout.decode', de: 'serveur', vers: 'serveur', type: 'soi', ko: verifs.some((v) => !v[0]), verifs, bolt11: bolt11.trim() })
+  if (decodee.expiree) throw new Error('Facture expirée : le destinataire n\'attend plus ce paiement')
+  if (!decodee.signatureValide) throw new Error('Signature de la facture invalide')
 
   if (cfg.mock) {
+  tracer({ cle: 'bitnob.pay', de: 'serveur', vers: 'bitnob', type: 'req', simule: true,
+  http: { methode: 'POST', url: `${cfg.baseUrl}/api/lightning/pay` },
+  entetes: [['X-Auth-Signature', '(simulation : aucune clé, aucun appel)']],
+  corps: abreger({ invoice: bolt11.trim(), reference: reference || 'demo-payout' }) })
   await new Promise((r) => setTimeout(r, 1200)) // on laisse le temps de voir
-  // Montant "extrait" de la facture pour l'affichage (lnbc1500n1… → 150 sats)
-  const m = bolt11.match(/^ln(?:bc|tb|bcrt)(\d+)([munp])?/i)
-  let montantSats = null
-  if (m) {
-  const n = Number(m[1])
-  const unit = { m: 1e5, '': 1e2, u: 1e-1, p: 1e-4 }[String(m[2] ?? '').toLowerCase()] ?? 1e2
-  montantSats = Math.round(n * unit)
-  }
+  tracer({ cle: 'bitnob.pay.rep', de: 'bitnob', vers: 'serveur', type: 'rep', simule: true,
+  http: { methode: 'POST', url: '/api/lightning/pay', statut: 200 }, corps: { status: 'success', amount_sat: decodee.montantSats } })
   return {
   id: `pay-${crypto.randomUUID().slice(0, 8)}`,
   status: 'success',
   feeSats: Math.floor(Math.random() * 3),
-  montantSats,
+  montantSats: decodee.montantSats,
+  paymentHash: decodee.paymentHash,
   reference: reference || 'demo-payout',
   mock: true,
   }
@@ -237,13 +325,14 @@ export async function payInvoice(bolt11, { reference } = {}) {
   const reponse = await appelerBitnob('POST', '/api/lightning/pay', {
   invoice: bolt11.trim(),
   reference: ref,
-  })
+  }, 'pay')
   const f = reponse.data ?? reponse
   return {
   id: f.id,
   status: f.status || 'success',
   feeSats: Number(f.fee_sat ?? f.fees ?? 0),
-  montantSats: f.amount_sat ? Number(f.amount_sat) : null,
+  montantSats: f.amount_sat ? Number(f.amount_sat) : decodee.montantSats,
+  paymentHash: decodee.paymentHash,
   reference: f.reference || ref,
   mock: false,
   }
