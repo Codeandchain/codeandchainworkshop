@@ -25,88 +25,160 @@ sélecteur en bas à droite (ou l'URL `#banc` / `#classique`) :
 ## Arborescence
 
 ```
-├── index.html → point d'entrée Vite
-├── vite.config.js → proxy /api → serveur Express en dev
-├── vercel.json → déploiement Vercel (SPA + fonction /api)
-├── api/index.js → enveloppe serverless de l'app Express
-├── server/
-│  ├── index.js → lance l'écoute HTTP + expiration factures
-│  ├── app.js → routes API + traitement webhook
-│  └── registre.js → mémoire : factures, journal, échanges, dédup
-├── src/
-│  ├── main.js · App.vue → choisit l'interface (#banc / #classique)
+├── backend/ → l'API Laravel 12 + SQLite (le SEUL dossier à déployer)
+│  ├── Modules/ → architecture modulaire (nwidart/laravel-modules)
+│  │  ├── Core/ → repository de base, code admin, contrat TraceurInterface
+│  │  ├── Lightning/ → le protocole : BOLT11 + secp256k1 (aucune base)
+│  │  ├── Bitnob/ → le fournisseur : client HTTP (HMAC) OU faux Bitnob
+│  │  ├── Paiements/ → factures, payout, webhook (les 3 vérifications)
+│  │  └── Atelier/ → journal, fil des échanges, rejeu, /api/info
+│  ├── modules_statuses.json → activer / désactiver un module
+│  ├── public/spa/ → l'interface compilée (générée par npm run build)
+│  └── .htaccess → redirige vers public/ si le domaine pointe sur backend/
+├── src/ → l'interface Vue 3
+│  ├── App.vue → choisit l'interface (#banc / #classique)
 │  ├── views/Banc.vue → commande · fil des échanges · inspecteur
 │  ├── views/Classique.vue → les 3 blocs : facture, payout, journal
-│  ├── styles/global.css → palette Sénégal (vert/jaune/rouge/sable)
 │  ├── components/AnatomieBolt11.vue → la facture décortiquée
-│  └── lib/
-│     ├── bitnob.js → TOUTE l'intégration Bitnob est ici
-│     └── bolt11.js → décoder (et fabriquer) une facture BOLT11
-└── scripts/smoke.mjs → test de bout en bout (mode simulation)
+│  ├── lib/bolt11.js → décodeur BOLT11 du navigateur
+│  ├── lib/api.js → appels à l'API (+ code admin)
+│  └── styles/global.css → palette Sénégal (vert/jaune/rouge/sable)
+├── vite.config.js → proxy /api → Laravel en dev, build → backend/public/spa
+└── scripts/
+   ├── smoke.mjs → test de bout en bout (mode simulation)
+   └── paquet-hebergeur.sh → le zip prêt pour l'hébergeur (npm run paquet)
 ```
 
-## 1. Démarrer en mode simulation (3 commandes)
+### Les modules
+
+Chaque module suit la même structure : `App/{Entities, Http, Providers,
+Repositories/{Eloquent,Interfaces}, Services/Interfaces}`, `Routes/api.php`,
+`Database/Migrations`, `config/`. Les contrôleurs reçoivent des **interfaces**,
+liées à leur implémentation dans le `ServiceProvider` du module.
+
+```mermaid
+graph LR
+  Atelier --> Paiements
+  Atelier --> Bitnob
+  Paiements --> Bitnob
+  Paiements --> Lightning
+  Bitnob --> Lightning
+  Atelier --> Core
+  Paiements --> Core
+  Bitnob --> Core
+```
+
+| Module | Ce qu'il contient | Le point à montrer |
+|--------|-------------------|--------------------|
+| **Core** | `EloquentRepository`, `ExigerCodeAdmin`, `TraceurInterface` (+ `NullTraceur`) | les autres modules dépendent d'un **contrat**, pas d'Atelier |
+| **Lightning** | `Bolt11CodecInterface`, `Secp256k1` | du pur protocole, réutilisable sans Bitnob |
+| **Bitnob** | `BitnobClientInterface` → `HttpBitnobClient` **ou** `SimulationBitnobClient` | `MOCK_PAYMENTS` choisit l'implémentation dans le provider ; le faux Bitnob a **sa propre table** |
+| **Paiements** | `FactureService`, `PayoutService`, `WebhookService`, middleware `AvancerLeTemps` | émet l'événement `WebhookTraite` |
+| **Atelier** | `TraceurService`, `AtelierService`, listener `MemoriserDernierWebhook` | écoute `WebhookTraite` pour le rejeu, sans que Paiements le sache |
+
+Désactive `Atelier` dans `modules_statuses.json` : les paiements marchent
+toujours (le `NullTraceur` du Core prend le relais), seuls le journal, le fil
+et `/api/info` disparaissent. Pour brancher un autre fournisseur (Strike,
+LNbits…), il suffit d'un nouveau module qui implémente `BitnobClientInterface`.
+
+Nouveau module : `php artisan module:make Tontine` (même structure `App/`).
+
+## 1. Démarrer en mode simulation
+
+Il faut **PHP ≥ 8.2** (avec `pdo_sqlite`), **Composer** et **Node ≥ 18**.
 
 ```bash
 npm install
-cp .env.example .env  # MOCK_PAYMENTS=true par défaut : aucune clé, aucun argent
-npm run dev  # API sur :3000, interface sur :5173
+cd backend
+composer install
+cp .env.example .env          # MOCK_PAYMENTS=true : aucune clé, aucun argent
+php artisan key:generate
+touch database/database.sqlite
+php artisan migrate
+cd ..
+npm run dev                   # API Laravel sur :8000, interface sur :5173
 ```
 
 Puis ouvre `http://localhost:5173`, clique sur « Créer la facture » : ~2 s plus
-tard, la facture est « payée », le webhook signé apparaît dans le journal, et tu
-peux rejouer ce même BOLT11 dans le bloc payout. `npm run smoke` rejoue tout ça
-automatiquement (lance d'abord `npm start` dans un autre terminal).
+tard, la facture est « payée », le webhook signé apparaît dans le fil, et tu
+peux rejouer ce même BOLT11 dans l'onglet « Envoyer ». `npm run smoke` rejoue
+tout ça automatiquement (avec `npm run dev` lancé dans un autre terminal).
 
 En mode simulation, le serveur **fabrique lui-même le webhook** que Bitnob
 aurait envoyé (signé avec le même HMAC-SHA512) et le fait passer par le **même
 code de vérification** : on démontre la vraie mécanique, sans argent.
 
+> PHP ne garde rien en mémoire entre deux requêtes (pas de `setTimeout`) : le
+> « paiement » simulé a lieu à la première requête qui arrive après le délai —
+> le polling de l'interface s'en charge. Pas de cron ni de worker à installer.
+
 ## 2. Brancher la clé Bitnob (sandbox)
 
-1. Crée un compte sur [app.bitnob.com](https://app.bitnob.com)  **Settings → API Keys** :
+1. Crée un compte sur [app.bitnob.com](https://app.bitnob.com) → **Settings → API Keys** :
   tu obtiens un **Client ID** et une **Secret Key** (l'API s'authentifie par
   signature HMAC, pas par une simple clé dans un header).
-2. Renseigne dans `.env` :
+2. Renseigne dans `backend/.env` :
 
   ```bash
   MOCK_PAYMENTS=false
   BITNOB_CLIENT_ID=tonClientId
   BITNOB_SECRET_KEY=taSecretKey
   BITNOB_WEBHOOK_SECRET=secretDuWebhook  # renvoyé à la création du webhook
+  ADMIN_TOKEN=unCodeLongEtAleatoire      # obligatoire pour le payout réel
   ```
 
-3. Redémarre : la page affiche désormais «  Bitnob réel » et les factures
+3. Recharge la page : elle affiche désormais « Bitnob réel » et les factures
   sont de vraies factures BOLT11, payables par n'importe quel wallet.
 
- La **sandbox** et la production partagent la même URL
+La **sandbox** et la production partagent la même URL
 (`https://api.bitnob.com`) : seule la clé change — ne mélange jamais les deux.
 
-## 3. Déployer sur Vercel + configurer le webhook
+## 3. Déployer sur un hébergement mutualisé
 
-1. Pousse le repo sur GitHub, importe-le sur [vercel.com](https://vercel.com)
-  (le `vercel.json` gère la SPA + la fonction `api/`).
-2. Dans les **Environment Variables** du projet Vercel, mets les mêmes vars que
-  dans `.env` (dont `PUBLIC_URL=https://ton-projet.vercel.app`).
-3. Dans le dashboard Bitnob, crée un webhook avec l'URL
-  `https://ton-projet.vercel.app/api/webhook/bitnob` et copie son
-  **signing secret** dans `BITNOB_WEBHOOK_SECRET`. L'interface affiche en haut
-  l'URL exacte à configurer.
+Ce qu'il faut chez l'hébergeur : **PHP ≥ 8.2** avec `pdo_sqlite`, `mbstring`,
+`openssl` (présents presque partout), Apache avec `mod_rewrite`. Pas besoin
+de Node, de Composer, de base MySQL, de SSH, de cron ni de worker.
 
- **Limite serverless** : l'état (factures, journal) vit en mémoire, partagé
-uniquement au sein d'une même instance. Sur Vercel, les instances sont
-éphémères et multiples — pour une démo solide en atelier, héberge plutôt le
-serveur sur une machine qui reste allumée (`npm start`, ou Render/Fly/Railway).
-Pour aller loin : remplace `server/registre.js` par une base (Vercel KV, Upstash
-Redis…), le reste du code ne change pas.
+### Fabriquer le paquet
+
+```bash
+npm run paquet
+```
+
+Ça produit `deploiement/bitnob-demo-AAAAMMJJ-HHMM.zip` : interface compilée,
+`vendor/` de production, base SQLite vide déjà migrée, et un `.env` de
+production (clé neuve, `APP_DEBUG=false`, simulation activée, et un
+**`ADMIN_TOKEN` aléatoire affiché à la fin** — note-le). Ton `backend/.env`
+local n'est jamais copié.
+
+### L'envoyer
+
+1. Décompresse l'archive chez l'hébergeur (gestionnaire de fichiers ou FTP).
+   Deux cas :
+   - **Tu peux choisir le dossier racine du domaine** (le mieux) : mets le
+     dossier à côté de `public_html` et pointe le domaine sur son `public/`.
+   - **Tu ne peux pas** : mets le contenu directement dans `public_html`. Le
+     `.htaccess` à la racine redirige tout vers `public/` et bloque `.env`, la
+     base SQLite et les logs (vérifié : ils répondent 403).
+2. Dans `.env`, remplace `APP_URL` par ton domaine.
+3. Donne les droits d'écriture (775) à `storage/`, `bootstrap/cache/` et
+   `database/` (SQLite écrit aussi un fichier temporaire à côté de la base).
+4. Ouvre `https://ton-domaine/api/info` : tu dois voir `{"mock":true,…}`.
+
+### Configurer le webhook Bitnob
+
+Dans le dashboard Bitnob, crée un webhook avec l'URL
+`https://ton-domaine/api/webhook/bitnob` (l'interface l'affiche en haut) et
+copie son **signing secret** dans `BITNOB_WEBHOOK_SECRET`.
 
 ### Avant de mettre en ligne avec de vraies clés : `ADMIN_TOKEN`
 
 Sans protection, n'importe qui connaissant l'URL pourrait appeler
-`POST /api/pay` et **payer avec ton solde Bitnob**. Donc :
+`POST /api/pay` et **payer avec ton solde Bitnob**. Le paquet en génère un ;
+pour en créer un à la main :
 
 ```bash
-ADMIN_TOKEN=$(node -e "console.log(require('crypto').randomBytes(24).toString('base64url'))")
+php -r "echo bin2hex(random_bytes(24)), PHP_EOL;"
 ```
 
 | Variable | Effet |
@@ -121,7 +193,7 @@ d'une facture et le webhook, protégé par sa signature HMAC.
 ## 4. Le flux, en schéma
 
 ```
-  NAVIGATEUR (Vue 3)  SERVEUR (Express)  BITNOB / RÉSEAU
+  NAVIGATEUR (Vue 3)  SERVEUR (Laravel)  BITNOB / RÉSEAU
   ─────────────────  ─────────────────  ────────────────
   "Créer facture" ──────────▶ POST /api/invoices ──────────▶ POST /api/lightning/invoices
   ◀── { id, request(BOLT11) } ◀── (201)
@@ -138,7 +210,7 @@ d'une facture et le webhook, protégé par sa signature HMAC.
 
 ### Ce que le fil montre (interface Banc)
 
-Le serveur trace chaque échange et les expose sur `GET /api/echanges` : le
+Le serveur trace chaque échange (table SQLite `echanges`) et les expose sur `GET /api/echanges` : le
 navigateur ne fabrique rien, il affiche ce qui s'est réellement passé. En
 simulation, les appels à Bitnob sont marqués **SIMULÉ** (le serveur montre
 ce qu'il aurait envoyé) ; avec de vraies clés, ce sont les vraies requêtes.
@@ -173,7 +245,7 @@ lnbcrt 1500n 1 p4vla70 pp5… sp5… dq… xq… [signature] [checksum]
   c'est le **reçu**. L'interface fait la vérification une fois la facture payée.
 - **On décode toujours avant de payer** : le bloc payout affiche montant,
   description, expiration et nœud, et refuse une facture illisible, mal
-  signée ou expirée (`payInvoice` fait la même vérification côté serveur).
+  signée ou expirée (`Bitnob::payerFacture()` fait la même vérification côté serveur, avec `app/Lightning/Bolt11.php`).
 
 En mode simulation, les factures sont de **vraies factures BOLT11 signées**
 (réseau regtest, par un « nœud de démo ») : tout décodeur les lit — par
@@ -213,15 +285,14 @@ avant un usage en production :
 
 5 idées pour transformer cette démo en vrai projet :
 
-1. **Un power-up / une action de plus** : ajoute une 4ᵉ opération côté `POST /api/invoices`
-  (montant libre, description personnalisée) et affiche-la dans `App.vue`.
+1. **Un power-up / une action de plus** : ajoute une route dans `backend/routes/api.php`
+  (montant libre, description personnalisée) et affiche-la dans `src/views/Banc.vue`.
 2. **Un autre domaine** : même cycle, autre vocabulaire — pourboire de restaurant,
-  cagnotte d'équipe de foot, participation à une tontine. Tout tient dans `App.vue`.
+  cagnotte d'équipe de foot, participation à une tontine. Les libellés sont dans `src/views/`.
 3. **Une tontine** : chaque membre paie X sats, le serveur affiche la cagnotte et
-  qui a payé ce mois-ci (`server/registre.js` suffit pour la démo).
+  qui a payé ce mois-ci (une migration + un modèle Laravel, la base SQLite suffit).
 4. **Un mur de pixels** : chaque webhook reçu allume un pixel d'une image partagée —
   c'est le webhook qui déclenche l'effet, jamais le navigateur.
 5. **Un autre pays / une autre chaîne** : même démo avec une palette et des textes
-  différents — tout le style est dans `src/styles/global.css`, tous les libellés
-  dans `App.vue`.
+  différents — le style est dans `src/styles/global.css` et dans chaque vue.
 

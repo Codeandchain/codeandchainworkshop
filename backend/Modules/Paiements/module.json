@@ -1,0 +1,12 @@
+{
+    "name": "Paiements",
+    "alias": "paiements",
+    "description": "Factures, payout et webhook : le cycle d'un paiement Lightning",
+    "keywords": [],
+    "priority": 0,
+    "providers": [
+        "Modules\\Paiements\\App\\Providers\\PaiementsServiceProvider"
+    ],
+    "files": [],
+    "requires": ["Core", "Lightning", "Bitnob"]
+}

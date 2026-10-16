@@ -1,18 +1,21 @@
 // ════════════════════════════════════════════════════════════════
 //  SMOKE TEST — vérifie le cycle complet en mode simulation.
-//  Lance d'abord le serveur (npm start ou npm run dev), puis :
+//  Lance d'abord l'API (npm run dev), puis :
 //  npm run smoke
 // ════════════════════════════════════════════════════════════════
 import crypto from 'node:crypto'
 import dotenv from 'dotenv'
 import { decoderBolt11, verifierPreimage } from '../src/lib/bolt11.js'
 
-//  On lit le même .env que le serveur : le secret de webhook doit être
-// identique des deux côtés pour que la signature de test soit valide.
-dotenv.config()
+//  On lit le même .env que l'API Laravel : le secret de webhook doit
+// être identique des deux côtés pour que la signature de test soit valide.
+dotenv.config({ path: new URL('../backend/.env', import.meta.url) })
 
-const BASE = process.env.SMOKE_URL || 'http://localhost:3000'
+const BASE = process.env.SMOKE_URL || 'http://127.0.0.1:8000'
 const SECRET = process.env.BITNOB_WEBHOOK_SECRET || 'demo-webhook-secret'
+// Si l'API est protégée (ADMIN_TOKEN), on envoie le code admin
+const ADMIN = process.env.SMOKE_ADMIN_TOKEN || process.env.ADMIN_TOKEN || ''
+const enTetesAdmin = ADMIN ? { 'x-admin-token': ADMIN } : {}
 
 let echecs = 0
 const ok = (libelle, condition, detail = '') => {
@@ -23,7 +26,7 @@ const pause = (ms) => new Promise((r) => setTimeout(r, ms))
 const api = async (chemin, { method = 'GET', corps = null } = {}) => {
   const r = await fetch(`${BASE}${chemin}`, {
   method,
-  headers: { 'Content-Type': 'application/json' },
+  headers: { 'Content-Type': 'application/json', ...enTetesAdmin },
   body: corps ? JSON.stringify(corps) : undefined,
   })
   return { status: r.status, data: await r.json().catch(() => ({})) }

@@ -1,0 +1,7 @@
+{
+    "Core": true,
+    "Lightning": true,
+    "Bitnob": true,
+    "Paiements": true,
+    "Atelier": true
+}

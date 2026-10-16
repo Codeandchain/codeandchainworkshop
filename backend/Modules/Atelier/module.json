@@ -1,0 +1,12 @@
+{
+    "name": "Atelier",
+    "alias": "atelier",
+    "description": "Ce que l'atelier montre : journal, fil des échanges, rejeu de webhook, infos de l'interface",
+    "keywords": [],
+    "priority": 10,
+    "providers": [
+        "Modules\\Atelier\\App\\Providers\\AtelierServiceProvider"
+    ],
+    "files": [],
+    "requires": ["Core", "Bitnob", "Paiements"]
+}

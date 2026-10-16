@@ -320,7 +320,7 @@ const heure = (at) => new Date(at).toLocaleTimeString('fr-FR')
         <div class="scene-defile">
           <div class="couloirs">
             <div class="couloir" style="--c: var(--nav)"><strong>Navigateur</strong><small>Vue, ce que voit l'utilisateur</small></div>
-            <div class="couloir" style="--c: var(--vert)"><strong>Ton serveur</strong><small>Express, détient les secrets</small></div>
+            <div class="couloir" style="--c: var(--vert)"><strong>Ton serveur</strong><small>Laravel, détient les secrets</small></div>
             <div class="couloir" style="--c: var(--jaune)"><strong>Bitnob · Lightning</strong><small>API + réseau</small></div>
           </div>
           <div class="scene" role="list">

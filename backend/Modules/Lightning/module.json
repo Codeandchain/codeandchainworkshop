@@ -1,0 +1,12 @@
+{
+    "name": "Lightning",
+    "alias": "lightning",
+    "description": "Le protocole Lightning : factures BOLT11 et signatures secp256k1 (aucune base de données)",
+    "keywords": [],
+    "priority": 0,
+    "providers": [
+        "Modules\\Lightning\\App\\Providers\\LightningServiceProvider"
+    ],
+    "files": [],
+    "requires": []
+}

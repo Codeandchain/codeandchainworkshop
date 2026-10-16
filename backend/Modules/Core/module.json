@@ -1,0 +1,12 @@
+{
+    "name": "Core",
+    "alias": "core",
+    "description": "Socle partagé : repository de base, code admin, contrat du traceur",
+    "keywords": [],
+    "priority": 0,
+    "providers": [
+        "Modules\\Core\\App\\Providers\\CoreServiceProvider"
+    ],
+    "files": [],
+    "requires": []
+}

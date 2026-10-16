@@ -1,0 +1,12 @@
+{
+    "name": "Bitnob",
+    "alias": "bitnob",
+    "description": "Le fournisseur de paiement : client HTTP Bitnob (HMAC) et faux Bitnob pour la simulation",
+    "keywords": [],
+    "priority": 0,
+    "providers": [
+        "Modules\\Bitnob\\App\\Providers\\BitnobServiceProvider"
+    ],
+    "files": [],
+    "requires": ["Core", "Lightning"]
+}

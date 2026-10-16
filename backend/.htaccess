@@ -1,0 +1,19 @@
+# ════════════════════════════════════════════════════════════════
+#  Hébergement mutualisé où l'on ne peut PAS choisir le dossier racine
+#  du site : on envoie tout le dossier backend/ dans public_html, et ce
+#  fichier redirige chaque requête vers public/ (le seul dossier qui
+#  doit être visible). Si ton hébergeur permet de pointer le domaine
+#  directement sur public/, fais-le : c'est encore mieux, et ce
+#  fichier ne sert plus.
+# ════════════════════════════════════════════════════════════════
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^(.*)$ public/$1 [L]
+</IfModule>
+
+# Ceinture et bretelles : jamais de .env, de base SQLite ni de log servis
+# (s'applique aussi aux sous-dossiers : ne pas y ajouter .php, sinon
+# public/index.php serait bloqué lui aussi)
+<FilesMatch "(^\.|\.(sqlite|sqlite3|db|log)$)">
+    Require all denied
+</FilesMatch>

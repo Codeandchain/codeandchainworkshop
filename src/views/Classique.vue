@@ -5,7 +5,7 @@
 //      son statut passer à "payé" (polling + webhook)
 //   2. PAYOUT  : payer une facture Lightning (envoyer des sats)
 //   3. JOURNAL : ce que le serveur a vu — webhooks reçus, payouts…
-//  Tout le code Bitnob est côté serveur (src/lib/bitnob.js) :
+//  Tout le code Bitnob est côté serveur (backend/app/Services/Bitnob.php) :
 //  le navigateur n'appelle jamais Bitnob directement.
 // ════════════════════════════════════════════════════════════════
 import { ref, onMounted, onUnmounted, computed } from 'vue'
